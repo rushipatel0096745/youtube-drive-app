@@ -1,11 +1,11 @@
 package com.youtubevault.app.ui.components
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import com.youtubevault.app.model.SourceFilter
@@ -23,7 +23,7 @@ fun BottomNav(
             SourceFilter.DRIVE to Icons.Default.Cloud,
             SourceFilter.YOUTUBE to Icons.Default.PlayArrow,
             SourceFilter.FAVOURITES to Icons.Default.Favorite,
-            SourceFilter.PLAYLIST to Icons.Default.QueueMusic
+            SourceFilter.PLAYLIST to Icons.AutoMirrored.Filled.QueueMusic
         )
         items.forEach { (filter, icon) ->
             NavigationBarItem(

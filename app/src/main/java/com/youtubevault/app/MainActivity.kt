@@ -35,6 +35,7 @@ class MainActivity : ComponentActivity() {
             val activeVideo by vm.activeVideo.collectAsState()
             val videos by vm.displayedVideos.collectAsState()
             val isLoading by vm.isLoading.collectAsState()
+            val ytQuotaExceeded by vm.ytQuotaExceeded.collectAsState()
             val sourceFilter by vm.sourceFilter.collectAsState()
             val selectedCategory by vm.selectedCategory.collectAsState()
             val searchQuery by vm.searchQuery.collectAsState()
@@ -83,9 +84,11 @@ class MainActivity : ComponentActivity() {
                     if (currentVideo != null) {
                         PlayerScreen(
                             video = currentVideo,
+                            upNextVideos = videos,
                             accessToken = token,
                             resumeTimeSec = vm.getResumeTime(currentVideo.id),
                             isFavorite = favorites.contains(currentVideo.id),
+                            onSelectVideo = vm::playVideo,
                             onToggleFavorite = { vm.toggleFavorite(currentVideo) },
                             onAddToPlaylist = { vm.openPlaylistModal(currentVideo) },
                             onChannelClick = if (currentVideo.channelId != null) {
@@ -100,6 +103,7 @@ class MainActivity : ComponentActivity() {
                             userEmail = userEmail,
                             videos = videos,
                             isLoading = isLoading,
+                            ytQuotaExceeded = ytQuotaExceeded,
                             sourceFilter = sourceFilter,
                             categories = vm.categories,
                             selectedCategory = selectedCategory,
