@@ -11,6 +11,10 @@ import com.youtubevault.app.data.PlaylistSyncManager
 import com.youtubevault.app.data.WatchHistoryManager
 import com.youtubevault.app.data.YouTubeRepository
 import com.youtubevault.app.model.AppThemeMode
+import com.youtubevault.app.model.ChannelInfo
+import com.youtubevault.app.model.ChannelMeta
+import com.youtubevault.app.model.ChannelTab
+import com.youtubevault.app.model.PlaylistFolder
 import com.youtubevault.app.model.SortOrder
 import com.youtubevault.app.model.SourceFilter
 import com.youtubevault.app.model.VideoItem
@@ -85,17 +89,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _videoDetails = MutableStateFlow(playlistSync.loadLocalVideoDetails())
 
-    private val _selectedPlaylistName = MutableStateFlow<String?>(null)
-    val selectedPlaylistName: StateFlow<String?> = _selectedPlaylistName.asStateFlow()
+    private val _openedPlaylistName = MutableStateFlow<String?>(null)
+    val openedPlaylistName: StateFlow<String?> = _openedPlaylistName.asStateFlow()
+
+    private val _playerQueueContext = MutableStateFlow<Pair<String, List<VideoItem>>?>(null)
+    val playerQueueContext: StateFlow<Pair<String, List<VideoItem>>?> = _playerQueueContext.asStateFlow()
 
     private val _playlistModalVideo = MutableStateFlow<VideoItem?>(null)
     val playlistModalVideo: StateFlow<VideoItem?> = _playlistModalVideo.asStateFlow()
 
-    private val _channelModalInfo = MutableStateFlow<Pair<String, String>?>(null)
-    val channelModalInfo: StateFlow<Pair<String, String>?> = _channelModalInfo.asStateFlow()
+    private val _activeChannel = MutableStateFlow<ChannelInfo?>(null)
+    val activeChannel: StateFlow<ChannelInfo?> = _activeChannel.asStateFlow()
+
+    private val _channelMeta = MutableStateFlow<ChannelMeta?>(null)
+    val channelMeta: StateFlow<ChannelMeta?> = _channelMeta.asStateFlow()
+
+    private val _channelTab = MutableStateFlow(ChannelTab.ALL)
+    val channelTab: StateFlow<ChannelTab> = _channelTab.asStateFlow()
 
     private val _channelVideos = MutableStateFlow<List<VideoItem>>(emptyList())
-    val channelVideos: StateFlow<List<VideoItem>> = _channelVideos.asStateFlow()
+
+    val displayedChannelVideos: StateFlow<List<VideoItem>> = combine(
+        _channelVideos,
+        _channelTab
+    ) { list, tab ->
+        when (tab) {
+            ChannelTab.ALL -> list
+            ChannelTab.POPULAR -> list.sortedByDescending { it.viewCount }
+            ChannelTab.SHORTS -> list.filter {
+                (it.durationSec != null && it.durationSec in 1..60) ||
+                    it.title.contains("#shorts", ignoreCase = true)
+            }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _isChannelLoading = MutableStateFlow(false)
     val isChannelLoading: StateFlow<Boolean> = _isChannelLoading.asStateFlow()
@@ -103,6 +129,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val categories: List<String>
         get() = if (_privateMode.value) YouTubeRepository.PRIVATE_CATEGORIES
         else YouTubeRepository.NORMAL_CATEGORIES
+
+    val playlistFolders: StateFlow<List<PlaylistFolder>> = combine(
+        _driveVideos,
+        _ytVideos,
+        _favorites,
+        _playlists,
+        _videoDetails
+    ) { driveList, ytList, favs, pls, details ->
+        val merged = (driveList + ytList + details.values).associateBy { it.id }
+        val folders = mutableListOf<PlaylistFolder>()
+        folders.add(PlaylistFolder(name = "Drive Videos", videos = driveList, isSystem = true))
+        val likedList = favs.mapNotNull { merged[it] }
+        folders.add(PlaylistFolder(name = "Liked Videos", videos = likedList, isSystem = true))
+        pls.forEach { (name, ids) ->
+            folders.add(
+                PlaylistFolder(
+                    name = name,
+                    videos = ids.mapNotNull { merged[it] },
+                    isSystem = false
+                )
+            )
+        }
+        folders
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val displayedVideos: StateFlow<List<VideoItem>> = combine(
         _driveVideos,
@@ -113,7 +163,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _sortOrder,
         _favorites,
         _playlists,
-        _selectedPlaylistName,
+        _openedPlaylistName,
         _videoDetails,
         _searchQuery
     ) { values ->
@@ -130,7 +180,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val favs = values[6] as Set<String>
         @Suppress("UNCHECKED_CAST")
         val pls = values[7] as Map<String, List<String>>
-        val activePl = values[8] as String?
+        val openedPl = values[8] as String?
         @Suppress("UNCHECKED_CAST")
         val details = values[9] as Map<String, VideoItem>
         val query = (values[10] as String).trim().lowercase()
@@ -144,10 +194,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             SourceFilter.PLAYLIST -> {
                 val merged = (allCombined + details.values).associateBy { it.id }
-                val targetName = activePl ?: pls.keys.firstOrNull()
-                if (targetName != null) {
-                    (pls[targetName] ?: emptyList()).mapNotNull { merged[it] }
-                } else emptyList()
+                when (openedPl) {
+                    null -> emptyList()
+                    "Drive Videos" -> driveList
+                    "Liked Videos" -> favs.mapNotNull { merged[it] }
+                    else -> (pls[openedPl] ?: emptyList()).mapNotNull { merged[it] }
+                }
             }
             SourceFilter.DRIVE -> {
                 val base = if (searchRes != null) searchRes.filter { it.source == VideoSource.DRIVE } else driveList
@@ -276,9 +328,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun loadYouTubeFeed(category: String, isPrivate: Boolean): List<VideoItem> {
         return if (isPrivate) {
-            val res = ytRepo.fetchPrivateMixedFallback(category, refreshCount)
-            _ytQuotaExceeded.value = res.quotaExceeded
-            res.videos
+            if (!_ytQuotaExceeded.value) {
+                val query = YouTubeRepository.PRIVATE_CATEGORY_QUERIES[category]
+                    ?: YouTubeRepository.PRIVATE_CATEGORY_QUERIES["All"].orEmpty()
+                val searchRes = ytRepo.searchVideos(query)
+                if (!searchRes.quotaExceeded && searchRes.videos.isNotEmpty()) {
+                    return searchRes.videos.map { it.copy(category = category) }
+                }
+                if (searchRes.quotaExceeded) {
+                    _ytQuotaExceeded.value = true
+                }
+            }
+            // Fallback to predefined creators only when search quota is exhausted
+            val fb = ytRepo.fetchPrivateMixedFallback(category, refreshCount)
+            fb.videos
         } else {
             val res = ytRepo.fetchPopularVideos(category)
             _ytQuotaExceeded.value = res.quotaExceeded
@@ -288,8 +351,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setSourceFilter(filter: SourceFilter) {
         _sourceFilter.value = filter
-        if (filter == SourceFilter.PLAYLIST && _selectedPlaylistName.value == null) {
-            _selectedPlaylistName.value = _playlists.value.keys.firstOrNull()
+        if (filter == SourceFilter.PLAYLIST) {
+            _openedPlaylistName.value = null
         }
     }
 
@@ -354,22 +417,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _themeMode.value = if (_themeMode.value == AppThemeMode.DARK) AppThemeMode.LIGHT else AppThemeMode.DARK
     }
 
-    fun playVideo(video: VideoItem) {
+    fun playVideo(video: VideoItem, playlistName: String? = null, playlistVideos: List<VideoItem>? = null) {
+        _playerQueueContext.value = if (playlistName != null && !playlistVideos.isNullOrEmpty()) {
+            playlistName to playlistVideos
+        } else {
+            null
+        }
+        _activeVideo.value = video
+    }
+
+    fun playFromCurrentQueue(video: VideoItem) {
         _activeVideo.value = video
     }
 
     fun playRandomVideo() {
         val list = displayedVideos.value
         if (list.isNotEmpty()) {
+            _playerQueueContext.value = null
             _activeVideo.value = list.random()
         }
     }
 
     fun closePlayer() {
         _activeVideo.value = null
+        _playerQueueContext.value = null
     }
 
     fun getResumeTime(videoId: String): Long = watchHistory.getProgress(videoId)?.currentTime ?: 0L
+
+    fun getProgressFraction(videoId: String): Float {
+        val p = watchHistory.getProgress(videoId) ?: return 0f
+        return if (p.duration > 0) (p.currentTime.toFloat() / p.duration.toFloat()).coerceIn(0f, 1f) else 0f
+    }
 
     fun saveWatchProgress(videoId: String, currentSec: Long, durationSec: Long) {
         watchHistory.saveProgress(videoId, currentSec, durationSec)
@@ -395,8 +474,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _playlistModalVideo.value = null
     }
 
-    fun selectPlaylist(name: String) {
-        _selectedPlaylistName.value = name
+    fun openPlaylist(name: String) {
+        _openedPlaylistName.value = name
+    }
+
+    fun closeOpenedPlaylist() {
+        _openedPlaylistName.value = null
     }
 
     fun createPlaylist(name: String, initialVideo: VideoItem? = null) {
@@ -412,7 +495,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         map[clean] = list
         _playlists.value = map
-        _selectedPlaylistName.value = clean
         persistAndSync()
     }
 
@@ -434,25 +516,66 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val map = _playlists.value.toMutableMap()
         map.remove(name)
         _playlists.value = map
-        if (_selectedPlaylistName.value == name) {
-            _selectedPlaylistName.value = map.keys.firstOrNull()
+        if (_openedPlaylistName.value == name) {
+            _openedPlaylistName.value = null
         }
         persistAndSync()
     }
 
     fun openChannel(video: VideoItem) {
-        val chId = video.channelId ?: return
-        _channelModalInfo.value = chId to video.channel
+        val info = ChannelInfo(
+            channelName = video.channel,
+            channelId = video.channelId,
+            source = video.source
+        )
+        _activeVideo.value = null
+        _activeChannel.value = info
+        _channelMeta.value = null
+        _channelTab.value = ChannelTab.ALL
         _channelVideos.value = emptyList()
+
+        if (video.source == VideoSource.DRIVE) {
+            _channelVideos.value = _driveVideos.value
+            return
+        }
+
         viewModelScope.launch {
             _isChannelLoading.value = true
-            _channelVideos.value = ytRepo.fetchChannelVideos(chId)
+            val meta = ytRepo.fetchChannelMeta(video.channelId, video.channel)
+            _channelMeta.value = meta
+            val chId = meta?.channelId ?: video.channelId
+            if (!chId.isNullOrBlank()) {
+                _channelVideos.value = ytRepo.fetchChannelVideos(chId, meta?.uploadsPlaylistId)
+            }
             _isChannelLoading.value = false
         }
     }
 
+    fun setChannelTab(tab: ChannelTab) {
+        _channelTab.value = tab
+    }
+
     fun closeChannel() {
-        _channelModalInfo.value = null
+        _activeChannel.value = null
+        _channelMeta.value = null
+    }
+
+    fun navigateBack(): Boolean {
+        return when {
+            _activeVideo.value != null -> {
+                closePlayer()
+                true
+            }
+            _activeChannel.value != null -> {
+                closeChannel()
+                true
+            }
+            _sourceFilter.value == SourceFilter.PLAYLIST && _openedPlaylistName.value != null -> {
+                closeOpenedPlaylist()
+                true
+            }
+            else -> false
+        }
     }
 
     private fun persistAndSync() {

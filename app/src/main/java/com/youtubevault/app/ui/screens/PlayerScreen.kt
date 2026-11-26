@@ -1,12 +1,20 @@
 package com.youtubevault.app.ui.screens
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.PictureInPictureParams
+import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.net.Uri
 import android.os.Build
 import android.util.Rational
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
@@ -17,8 +25,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Fullscreen
@@ -41,7 +50,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.okhttp.OkHttpDataSource
@@ -49,21 +57,19 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
-import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.YouTubePlayer
-import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.listeners.AbstractYouTubePlayerListener
-import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.listeners.FullscreenListener
-import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.options.IFramePlayerOptions
-import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.views.YouTubePlayerView
+import com.youtubevault.app.BuildConfig
 import com.youtubevault.app.data.DriveRepository
 import com.youtubevault.app.model.VideoItem
 import com.youtubevault.app.model.VideoSource
 import kotlinx.coroutines.delay
 import okhttp3.OkHttpClient
 
+@SuppressLint("SetJavaScriptEnabled")
 @OptIn(UnstableApi::class)
 @Composable
 fun PlayerScreen(
     video: VideoItem,
+    upNextTitle: String = "Up Next",
     upNextVideos: List<VideoItem>,
     accessToken: String,
     resumeTimeSec: Long,
@@ -78,7 +84,6 @@ fun PlayerScreen(
 ) {
     val context = LocalContext.current
     val view = LocalView.current
-    val lifecycleOwner = LocalLifecycleOwner.current
     var isFullscreen by remember { mutableStateOf(false) }
 
     // Handle Android Back button: exit fullscreen first before closing player
@@ -129,11 +134,15 @@ fun PlayerScreen(
                         .fillMaxWidth()
                         .background(Color.Black)
                         .statusBarsPadding()
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                        .padding(horizontal = 4.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     IconButton(onClick = onClose) {
-                        Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back",
+                            tint = Color.White
+                        )
                     }
                     Text(
                         text = video.title,
@@ -231,7 +240,16 @@ fun PlayerScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
-                    var fullscreenCustomView by remember { mutableStateOf<View?>(null) }
+                    // Direct WebView YouTube Embed Player (reliable playback + native HTML5 fullscreen)
+                    var webViewRef by remember(video.id) { mutableStateOf<WebView?>(null) }
+
+                    DisposableEffect(video.id) {
+                        onDispose {
+                            webViewRef?.onPause()
+                            webViewRef?.destroy()
+                            webViewRef = null
+                        }
+                    }
 
                     key(video.id) {
                         AndroidView(
@@ -241,45 +259,96 @@ fun PlayerScreen(
                                         ViewGroup.LayoutParams.MATCH_PARENT,
                                         ViewGroup.LayoutParams.MATCH_PARENT
                                     )
+                                    setBackgroundColor(android.graphics.Color.BLACK)
                                 }
-                                val ytView = YouTubePlayerView(ctx).apply {
-                                    enableAutomaticInitialization = false
-                                    lifecycleOwner.lifecycle.addObserver(this)
+                                var customView: View? = null
+                                var customCallback: WebChromeClient.CustomViewCallback? = null
 
-                                    addFullscreenListener(object : FullscreenListener {
-                                        override fun onEnterFullscreen(
-                                            fullscreenView: View,
-                                            exitFullscreen: () -> Unit
-                                        ) {
+                                val webView = WebView(ctx).apply {
+                                    layoutParams = FrameLayout.LayoutParams(
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                        ViewGroup.LayoutParams.MATCH_PARENT
+                                    )
+                                    setBackgroundColor(android.graphics.Color.BLACK)
+                                    settings.apply {
+                                        javaScriptEnabled = true
+                                        domStorageEnabled = true
+                                        mediaPlaybackRequiresUserGesture = false
+                                        loadWithOverviewMode = true
+                                        useWideViewPort = true
+                                        userAgentString = userAgentString.replace("; wv", "")
+                                        mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                                    }
+                                    webViewClient = object : WebViewClient() {
+                                        override fun shouldOverrideUrlLoading(
+                                            view: WebView?,
+                                            request: WebResourceRequest?
+                                        ): Boolean {
+                                            val url = request?.url?.toString() ?: return false
+                                            // Keep embed / auth / player frames inside WebView; open watch links externally
+                                            if (url.contains("youtube.com/watch") || url.contains("youtu.be/")) {
+                                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                                                ctx.startActivity(intent)
+                                                return true
+                                            }
+                                            return false
+                                        }
+                                    }
+                                    webChromeClient = object : WebChromeClient() {
+                                        override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
+                                            if (view == null) return
                                             isFullscreen = true
-                                            fullscreenCustomView = fullscreenView
-                                            container.addView(fullscreenView)
+                                            customView = view
+                                            customCallback = callback
+                                            container.addView(
+                                                view,
+                                                FrameLayout.LayoutParams(
+                                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                                    ViewGroup.LayoutParams.MATCH_PARENT
+                                                )
+                                            )
                                         }
 
-                                        override fun onExitFullscreen() {
+                                        override fun onHideCustomView() {
                                             isFullscreen = false
-                                            fullscreenCustomView?.let { container.removeView(it) }
-                                            fullscreenCustomView = null
+                                            customView?.let { container.removeView(it) }
+                                            customView = null
+                                            customCallback?.onCustomViewHidden()
+                                            customCallback = null
                                         }
-                                    })
+                                    }
 
-                                    val options = IFramePlayerOptions.Builder()
-                                        .controls(1)
-                                        .fullscreen(1)
-                                        .build()
-
-                                    initialize(object : AbstractYouTubePlayerListener() {
-                                        override fun onReady(youTubePlayer: YouTubePlayer) {
-                                            youTubePlayer.loadVideo(video.id, resumeTimeSec.toFloat())
-                                        }
-
-                                        override fun onCurrentSecond(youTubePlayer: YouTubePlayer, second: Float) {
-                                            val dur = video.durationSec?.toLong() ?: 0L
-                                            if (dur > 0) onProgress(second.toLong(), dur)
-                                        }
-                                    }, options)
+                                    val startParam = if (resumeTimeSec > 0) "&start=$resumeTimeSec" else ""
+                                    val html = """
+                                        <!DOCTYPE html>
+                                        <html>
+                                        <head>
+                                          <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+                                          <style>
+                                            html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
+                                            iframe { width: 100%; height: 100%; border: 0; }
+                                          </style>
+                                        </head>
+                                        <body>
+                                          <iframe
+                                            src="https://www.youtube.com/embed/${video.id}?autoplay=1&playsinline=1&fs=1&rel=0&enablejsapi=1$startParam"
+                                            referrerpolicy="strict-origin-when-cross-origin"
+                                            allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
+                                            allowfullscreen>
+                                          </iframe>
+                                        </body>
+                                        </html>
+                                    """.trimIndent()
+                                    loadDataWithBaseURL(
+                                        "https://${BuildConfig.APPLICATION_ID}",
+                                        html,
+                                        "text/html",
+                                        "utf-8",
+                                        null
+                                    )
                                 }
-                                container.addView(ytView)
+                                webViewRef = webView
+                                container.addView(webView)
                                 container
                             },
                             modifier = Modifier.fillMaxSize()
@@ -323,37 +392,66 @@ fun PlayerScreen(
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
                             text = video.channel,
-                            color = if (video.channelId != null) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = MaterialTheme.colorScheme.primary,
                             style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium,
-                            modifier = if (video.channelId != null && onChannelClick != null) {
-                                Modifier.clickable { onChannelClick() }
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = if (onChannelClick != null) {
+                                Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .clickable { onChannelClick() }
+                                    .padding(vertical = 2.dp)
                             } else Modifier
                         )
                         Spacer(modifier = Modifier.height(14.dp))
 
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
                             FilledTonalButton(onClick = onToggleFavorite) {
                                 Icon(
                                     imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                                     contentDescription = null,
-                                    tint = if (isFavorite) Color(0xFFEF4444) else LocalContentColor.current
+                                    tint = if (isFavorite) Color(0xFFEF4444) else LocalContentColor.current,
+                                    modifier = Modifier.size(18.dp)
                                 )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(if (isFavorite) "Favourited" else "Favourite")
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(if (isFavorite) "Favourited" else "Fav")
                             }
 
                             FilledTonalButton(onClick = onAddToPlaylist) {
-                                Icon(Icons.AutoMirrored.Filled.PlaylistAdd, contentDescription = null)
-                                Spacer(modifier = Modifier.width(6.dp))
+                                Icon(
+                                    Icons.AutoMirrored.Filled.PlaylistAdd,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
                                 Text("Save")
                             }
 
                             FilledTonalButton(onClick = { isFullscreen = true }) {
-                                Icon(Icons.Default.Fullscreen, contentDescription = null)
-                                Spacer(modifier = Modifier.width(6.dp))
+                                Icon(
+                                    Icons.Default.Fullscreen,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
                                 Text("Full")
+                            }
+
+                            if (video.source == VideoSource.YOUTUBE) {
+                                IconButton(onClick = {
+                                    val intent = Intent(
+                                        Intent.ACTION_VIEW,
+                                        Uri.parse("https://www.youtube.com/watch?v=${video.id}")
+                                    )
+                                    context.startActivity(intent)
+                                }) {
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.OpenInNew,
+                                        contentDescription = "Open in YouTube"
+                                    )
+                                }
                             }
                         }
                         Spacer(modifier = Modifier.height(8.dp))
@@ -364,7 +462,7 @@ fun PlayerScreen(
                     if (nextList.isNotEmpty()) {
                         item {
                             Text(
-                                text = "Up Next",
+                                text = upNextTitle,
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant

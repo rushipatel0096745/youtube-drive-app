@@ -1,6 +1,7 @@
 package com.youtubevault.app.data
 
 import com.youtubevault.app.BuildConfig
+import com.youtubevault.app.model.ChannelMeta
 import com.youtubevault.app.model.VideoItem
 import com.youtubevault.app.model.VideoSource
 import kotlinx.coroutines.Dispatchers
@@ -22,6 +23,14 @@ class YouTubeRepository(private val client: OkHttpClient = OkHttpClient()) {
     companion object {
         val NORMAL_CATEGORIES = listOf("All", "Trending", "Music", "Gaming", "Tech", "News", "Podcasts")
         val PRIVATE_CATEGORIES = listOf("All", "Short", "Long", "Undercut", "Colors")
+
+        val PRIVATE_CATEGORY_QUERIES = mapOf(
+            "All" to "women haircut transformation salon makeover bob undercut",
+            "Short" to "women short haircut pixie bob transformation salon makeover",
+            "Long" to "girls long hair haircut makeover transformation layers salon",
+            "Undercut" to "women undercut haircut nape buzz shave makeover salon",
+            "Colors" to "hair color transformation balayage blonde salon dye makeover"
+        )
 
         val NORMAL_CATEGORY_IDS = mapOf(
             "All" to null,
@@ -84,7 +93,7 @@ class YouTubeRepository(private val client: OkHttpClient = OkHttpClient()) {
             ids.chunked(50).forEach { chunk ->
                 val joined = chunk.joinToString(",")
                 val url =
-                    "https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails&id=$joined&key=$apiKey"
+                    "https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails,statistics&id=$joined&key=$apiKey"
                 val (json, _) = getJsonWithQuotaCheck(url)
                 val items = json?.optJSONArray("items") ?: return@forEach
                 for (i in 0 until items.length()) {
@@ -186,10 +195,67 @@ class YouTubeRepository(private val client: OkHttpClient = OkHttpClient()) {
         YouTubeFetchResult(fetchVideosByIds(ids, "Search"), false)
     }
 
-    suspend fun fetchChannelVideos(channelId: String): List<VideoItem> = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank() || channelId.isBlank()) return@withContext emptyList()
-        val uploadsPlaylist = if (channelId.startsWith("UC")) "UU" + channelId.drop(2) else channelId
-        fetchPlaylistVideos(uploadsPlaylist, "Channel", maxResults = 15).videos
+    suspend fun fetchChannelMeta(channelId: String?, channelName: String): ChannelMeta? =
+        withContext(Dispatchers.IO) {
+            if (apiKey.isBlank()) return@withContext null
+            var resolvedId = channelId
+            if (resolvedId.isNullOrBlank() && channelName.isNotBlank()) {
+                val q = URLEncoder.encode(channelName, "UTF-8")
+                val searchUrl =
+                    "https://www.googleapis.com/youtube/v3/search?part=snippet&type=channel&q=$q&maxResults=1&key=$apiKey"
+                val (sJson, _) = getJsonWithQuotaCheck(searchUrl)
+                resolvedId = sJson?.optJSONArray("items")
+                    ?.optJSONObject(0)
+                    ?.optJSONObject("id")
+                    ?.optString("channelId")
+            }
+            if (resolvedId.isNullOrBlank()) return@withContext null
+
+            val chUrl =
+                "https://www.googleapis.com/youtube/v3/channels?part=snippet,contentDetails,statistics&id=$resolvedId&key=$apiKey"
+            val (json, _) = getJsonWithQuotaCheck(chUrl)
+            val item = json?.optJSONArray("items")?.optJSONObject(0) ?: return@withContext null
+            val snippet = item.optJSONObject("snippet")
+            val stats = item.optJSONObject("statistics")
+            val contentDetails = item.optJSONObject("contentDetails")
+            val thumbs = snippet?.optJSONObject("thumbnails")
+            val avatar = thumbs?.optJSONObject("medium")?.optString("url")
+                ?: thumbs?.optJSONObject("default")?.optString("url")
+
+            val uploadsPl = contentDetails
+                ?.optJSONObject("relatedPlaylists")
+                ?.optString("uploads")
+                ?.ifBlank { null }
+                ?: if (resolvedId.startsWith("UC")) "UU" + resolvedId.drop(2) else resolvedId
+
+            ChannelMeta(
+                channelId = resolvedId,
+                title = snippet?.optString("title", channelName) ?: channelName,
+                avatarUrl = avatar,
+                subscriberCount = formatCount(stats?.optString("subscriberCount")),
+                videoCount = formatCount(stats?.optString("videoCount")),
+                description = snippet?.optString("description")?.ifBlank { null },
+                customUrl = snippet?.optString("customUrl")?.ifBlank { null },
+                uploadsPlaylistId = uploadsPl
+            )
+        }
+
+    suspend fun fetchChannelVideos(channelId: String, uploadsPlaylistId: String? = null): List<VideoItem> =
+        withContext(Dispatchers.IO) {
+            if (apiKey.isBlank() || channelId.isBlank()) return@withContext emptyList()
+            val pl = uploadsPlaylistId?.ifBlank { null }
+                ?: if (channelId.startsWith("UC")) "UU" + channelId.drop(2) else channelId
+            fetchPlaylistVideos(pl, "Channel", maxResults = 30).videos
+        }
+
+    private fun formatCount(numStr: String?): String? {
+        val num = numStr?.toLongOrNull() ?: return null
+        return when {
+            num >= 1_000_000_000 -> String.format("%.1fB", num / 1_000_000_000.0).replace(".0B", "B")
+            num >= 1_000_000 -> String.format("%.1fM", num / 1_000_000.0).replace(".0M", "M")
+            num >= 1_000 -> String.format("%.1fK", num / 1_000.0).replace(".0K", "K")
+            else -> num.toString()
+        }
     }
 
     private fun getJsonWithQuotaCheck(url: String): Pair<JSONObject?, Boolean> {
@@ -235,6 +301,7 @@ class YouTubeRepository(private val client: OkHttpClient = OkHttpClient()) {
 
         val isoDuration = obj.optJSONObject("contentDetails")?.optString("duration")
         val sec = isoDuration?.let { parseIsoDuration(it) }
+        val views = obj.optJSONObject("statistics")?.optString("viewCount")?.toLongOrNull() ?: 0L
 
         return VideoItem(
             id = id,
@@ -245,7 +312,8 @@ class YouTubeRepository(private val client: OkHttpClient = OkHttpClient()) {
             duration = sec?.let { DriveRepository.formatSeconds(it) },
             durationSec = sec,
             channel = channel,
-            channelId = channelId.ifBlank { null }
+            channelId = channelId.ifBlank { null },
+            viewCount = views
         )
     }
 

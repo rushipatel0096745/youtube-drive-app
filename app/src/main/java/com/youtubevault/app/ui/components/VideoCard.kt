@@ -31,6 +31,7 @@ import com.youtubevault.app.model.VideoSource
 fun VideoCard(
     video: VideoItem,
     isFavorite: Boolean,
+    progressFraction: Float = 0f,
     onPlay: () -> Unit,
     onToggleFavorite: () -> Unit,
     onAddToPlaylist: () -> Unit,
@@ -130,6 +131,24 @@ fun VideoCard(
                         )
                     }
                 }
+
+                // Watch progress bar
+                if (progressFraction > 0.01f) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(3.dp)
+                            .align(Alignment.BottomStart)
+                            .background(Color.White.copy(alpha = 0.25f))
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(progressFraction.coerceIn(0f, 1f))
+                                .fillMaxHeight()
+                                .background(Color(0xFFFF0033))
+                        )
+                    }
+                }
             }
 
             Row(
@@ -148,7 +167,7 @@ fun VideoCard(
                             else MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
                         )
                         .let {
-                            if (video.channelId != null && onChannelClick != null) {
+                            if (onChannelClick != null) {
                                 it.clickable { onChannelClick() }
                             } else it
                         },
@@ -178,11 +197,11 @@ fun VideoCard(
                     Text(
                         text = "${video.channel} • ${video.category}",
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (video.channelId != null) MaterialTheme.colorScheme.primary
+                        color = if (onChannelClick != null) MaterialTheme.colorScheme.primary
                         else MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = if (video.channelId != null && onChannelClick != null) {
+                        modifier = if (onChannelClick != null) {
                             Modifier
                                 .clip(RoundedCornerShape(4.dp))
                                 .clickable { onChannelClick() }
